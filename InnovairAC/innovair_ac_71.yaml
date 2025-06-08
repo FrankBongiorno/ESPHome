@@ -1,0 +1,245 @@
+esphome:
+  name: innovair-ac-71
+  friendly_name: Innovair AC Remote Bedroom
+  platformio_options:
+    build_flags:
+      - -DESP8266_ARDUINO_NO_WIFI_STORAGE
+
+substitutions:
+  compile_time: "2025-06-07 13:10:00"
+  source_file: "innovair_ac_71.yaml"
+
+time:
+  - platform: sntp
+    id: sntp_time
+    servers:
+      - pool.ntp.org
+    timezone: America/Phoenix
+
+esp8266:
+  board: esp8285
+
+globals:
+  - id: learned_codes
+    type: std::map<std::string, std::vector<int>>
+    restore_value: yes
+    initial_value: '{}'
+
+logger:
+  level: INFO
+
+ota:
+  platform: esphome
+  password: "DRywhiyDcE8hlfNEv/5ZABvwjxZBbv6q"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  manual_ip:
+    static_ip: 192.168.0.71
+    gateway: 192.168.0.1
+    subnet: 255.255.255.0
+    dns1: 8.8.8.8
+    dns2: 8.8.4.4
+  ap:
+    ssid: "innovair-ac-71 Fallback Hotspot"
+    password: "10661066"
+
+mqtt:
+  broker: threesticks.dyndns.org
+  port: 1883
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  client_id: innovair-ac-8285-71
+  discovery: true
+  discovery_retain: true
+  topic_prefix: innovair-ac-71
+  on_connect:
+    - logger.log: "Connected to MQTT broker"
+  on_disconnect:
+    - logger.log: "Disconnected from MQTT broker"
+  on_message:
+    - topic: innovair-ac-71/learn
+      then:
+        - lambda: |-
+            std::string command_name = x;
+            id(learn_command_name).publish_state(command_name);
+            id(learn_mode).publish_state("Waiting for IR signal...");
+            id(is_learning).set(true);
+    - topic: innovair-ac-71/command
+      then:
+        - lambda: |-
+            if (id(learned_codes).count(x) > 0) {
+              std::vector<int> raw_codes = id(learned_codes)[x];
+              id(remote_transmitter).transmit_raw(raw_codes);
+              id(sent_ir_code).publish_state("Sent: " + x);
+              auto time = id(sntp_time).now();
+              char time_str[32];
+              if (time.is_valid()) {
+                snprintf(time_str, sizeof(time_str), "%04d-%02d-%02d %02d:%02d:%02d",
+                         time.year, time.month, time.day_of_month, time.hour, time.minute, time.second);
+                id(last_command_time).publish_state(time_str);
+              } else {
+                id(last_command_time).publish_state("Waiting for time sync");
+              }
+              id(mqtt_client).publish("innovair-ac-71/sent", "Sent: " + x);
+            } else {
+              id(sent_ir_code).publish_state("Error: Unknown command " + x);
+            }
+
+web_server:
+  port: 80
+  version: 3
+  local: true
+
+remote_transmitter:
+  pin: GPIO4
+  carrier_duty_percent: 50%
+
+remote_receiver:
+  pin:
+    number: GPIO14
+    inverted: True
+  dump: raw
+  tolerance: 25%
+  on_raw:
+    then:
+      - if:
+          condition:
+            lambda: 'return id(is_learning).state;'
+          then:
+            - lambda: |-
+                std::string command_name = id(learn_command_name).state;
+                std::vector<int> raw_codes;
+                for (auto code : x) {
+                  raw_codes.push_back(code);
+                }
+                id(learned_codes)[command_name] = raw_codes;
+                id(learn_mode).publish_state("Learned: " + command_name);
+                id(is_learning).set(false);
+                id(received_ir_code).publish_state("Learned: " + command_name);
+                auto time = id(sntp_time).now();
+                char time_str[32];
+                if (time.is_valid()) {
+                  snprintf(time_str, sizeof(time_str), "%04d-%02d-%02d %02d:%02d:%02d",
+                           time.year, time.month, time.day_of_month, time.hour, time.minute, time.second);
+                  id(last_command_time).publish_state(time_str);
+                } else {
+                  id(last_command_time).publish_state("Waiting for time sync");
+                }
+                std::string payload = "Learned: " + command_name;
+                id(mqtt_client).publish("innovair-ac-71/received", payload);
+            - homeassistant.service:
+                service: persistent_notification.create
+                data:
+                  title: "IR Code Learned"
+                  message: !lambda 'return "Command " + id(learn_command_name).state + " learned successfully.";'
+
+binary_sensor:
+  - platform: template
+    name: "Learn Mode"
+    id: is_learning
+    internal: true
+
+text_sensor:
+  - platform: template
+    name: "Sent IR Code"
+    id: sent_ir_code
+    icon: "mdi:remote"
+  - platform: template
+    name: "Received IR Code"
+    id: received_ir_code
+    icon: "mdi:remote"
+  - platform: template
+    name: "Learn Command Name"
+    id: learn_command_name
+    icon: "mdi:learn"
+  - platform: template
+    name: "Learn Mode Status"
+    id: learn_mode
+    icon: "mdi:learn"
+  - platform: template
+    name: "Compiled On"
+    id: compiled_at
+    icon: "mdi:clock"
+    lambda: 'return esphome::optional<std::string>("$source_file at $compile_time");'
+    update_interval: 60s
+  - platform: template
+    name: "Last Command Time"
+    id: last_command_time
+    icon: "mdi:clock-outline"
+    update_interval: 60s
+
+button:
+  - platform: template
+    name: "Learn New Command"
+    id: btn_learn
+    icon: "mdi:learn"
+    on_press:
+      - mqtt.publish:
+          topic: innovair-ac-71/learn
+          payload: "NewCommand"
+  - platform: template
+    name: "Power On"
+    id: btn_power_on
+    icon: "mdi:power"
+    on_press:
+      - mqtt.publish:
+          topic: innovair-ac-71/command
+          payload: "PowerOn"
+  - platform: template
+    name: "Power Off"
+    id: btn_power_off
+    icon: "mdi:power-off"
+    on_press:
+      - mqtt.publish:
+          topic: innovair-ac-71/command
+          payload: "PowerOff"
+  - platform: template
+    name: "Cool 24C"
+    id: btn_cool_24c
+    icon: "mdi:snowflake"
+    on_press:
+      - mqtt.publish:
+          topic: innovair-ac-71/command
+          payload: "Cool24C"
+  - platform: template
+    name: "Heat 26C"
+    id: btn_heat_26c
+    icon: "mdi:radiator"
+    on_press:
+      - mqtt.publish:
+          topic: innovair-ac-71/command
+          payload: "Heat26C"
+  - platform: template
+    name: "Fan High"
+    id: btn_fan_high
+    icon: "mdi:fan"
+    on_press:
+      - mqtt.publish:
+          topic: innovair-ac-71/command
+          payload: "FanHigh"
+  - platform: template
+    name: "Swing On"
+    id: btn_swing_on
+    icon: "mdi:swap-vertical"
+    on_press:
+      - mqtt.publish:
+          topic: innovair-ac-71/command
+          payload: "SwingOn"
+  - platform: template
+    name: "Turbo Cool"
+    id: btn_turbo_cool
+    icon: "mdi:fast-forward"
+    on_press:
+      - mqtt.publish:
+          topic: innovair-ac-71/command
+          payload: "TurboCool"
+  - platform: template
+    name: "Sleep Cool"
+    id: btn_sleep_cool
+    icon: "mdi:bed"
+    on_press:
+      - mqtt.publish:
+          topic: innovair-ac-71/command
+          payload: "SleepCool"
