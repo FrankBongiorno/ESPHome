@@ -6,7 +6,7 @@ esphome:
       - -DESP8266_ARDUINO_NO_WIFI_STORAGE
 
 substitutions:
-  compile_time: "2025-06-07 17:35:00"
+  compile_time: "2025-06-07 19:05:00"
   source_file: "innovair-70.yaml"
 
 # Add to the top-level section, after 'substitutions'
